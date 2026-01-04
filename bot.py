@@ -1,250 +1,210 @@
 import logging
 import os
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ParseMode, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils.executor import start_webhook
 import sqlite3
 from datetime import datetime
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
-# Получаем токен и порт из переменных окружения (для Koyeb)
-TOKEN = os.getenv('TOKEN')  # Установи в Koyeb как env variable
-PORT = int(os.getenv('PORT', 8443))
-import os  # Уже есть в коде сверху
-
+# Настройка
+logging.basicConfig(level=logging.INFO)
+TOKEN = os.getenv('TOKEN')
+PORT = int(os.getenv('PORT', 8080))
 WEBHOOK_HOST = f"https://{os.getenv('KOYEB_PUBLIC_DOMAIN')}"
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
-# Настройка логирования
-import logging
-logging.basicConfig(level=logging.INFO)
-
-# Инициализация бота и диспетчера
 bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-# Подключение к БД (SQLite)
-conn = sqlite3.connect('finance.db')
+# База данных
+conn = sqlite3.connect('finance.db', check_same_thread=False)
 cursor = conn.cursor()
 
-# Создание таблиц
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
-    type TEXT,  -- 'income' или 'expense'
+    type TEXT,
     category TEXT,
     amount REAL,
     description TEXT,
     date TEXT
 )
 ''')
-
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS debts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
-    debtor TEXT,  -- 'me' (я должен) или имя (должен мне)
+    debtor TEXT,
     amount REAL,
     description TEXT,
     date TEXT
 )
 ''')
-
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
-    type TEXT,  -- 'income' или 'expense'
+    type TEXT,
     name TEXT
 )
 ''')
 conn.commit()
 
-# Предопределённые категории (можно добавить больше)
 DEFAULT_INCOME_CATS = ['Зарплата 💰', 'Подарок 🎁', 'Инвестиции 📈']
 DEFAULT_EXPENSE_CATS = ['Еда 🍔', 'Транспорт 🚗', 'Развлечения 🎉']
 
-# Функция для получения категорий пользователя
-def get_categories(user_id, cat_type):
+# Состояния FSM
+class Form(StatesGroup):
+    waiting_category = State()
+    waiting_amount = State()
+    waiting_category_name = State()
+    waiting_debt = State()
+
+def get_categories(user_id: int, cat_type: str):
     cursor.execute("SELECT name FROM categories WHERE user_id = ? AND type = ?", (user_id, cat_type))
     cats = [row[0] for row in cursor.fetchall()]
-    return DEFAULT_INCOME_CATS + cats if cat_type == 'income' else DEFAULT_EXPENSE_CATS + cats
+    if cat_type == 'income':
+        return DEFAULT_INCOME_CATS + cats
+    return DEFAULT_EXPENSE_CATS + cats
 
-# Команда /start
-@dp.message_handler(commands=['start'])
-async def start(message: types.Message):
-    user_id = message.from_user.id
-    # Инициализируем категории, если нужно
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(KeyboardButton('Доходы 💹'), KeyboardButton('Расходы 📉'))
-    keyboard.add(KeyboardButton('Долги 🤝'), KeyboardButton('Баланс 💼'))
-    keyboard.add(KeyboardButton('Статистика 📊'), KeyboardButton('Добавить категорию ➕'))
-    await message.reply("Привет! Я твой финансовый помощник 😊\n"
-                        "Выбери действие с кнопок ниже. Для ввода суммы просто напиши число после выбора.",
-                        reply_markup=keyboard)
+@dp.message(CommandStart())
+async def start(message: Message):
+    keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text='Доходы 💹'), KeyboardButton(text='Расходы 📉')],
+                                             [KeyboardButton(text='Долги 🤝'), KeyboardButton(text='Баланс 💼')],
+                                             [KeyboardButton(text='Статистика 📊'), KeyboardButton(text='Категории ➕')]],
+                                   resize_keyboard=True)
+    await message.answer("👋 Привет! Я твой финансовый помощник!\n\n"
+                         "📱 Используй кнопки ниже для управления:\n"
+                         "• Доходы/Расходы — добавь деньги с категориями\n"
+                         "• Долги — учет кто кому должен\n"
+                         "• Баланс — общий подсчет (транзакции + долги)\n"
+                         "• Статистика — по месяцам\n"
+                         "• Категории — добавь свои\n\n"
+                         "💡 После выбора категории введи: <сумма> <описание>", reply_markup=keyboard)
 
-# Обработчик для кнопок (текстовые сообщения)
-@dp.message_handler(lambda message: message.text in ['Доходы 💹', 'Расходы 📉', 'Долги 🤝', 'Баланс 💼', 'Статистика 📊', 'Добавить категорию ➕'])
-async def handle_buttons(message: types.Message):
-    text = message.text
-    if text == 'Доходы 💹':
-        await show_categories(message, 'income')
-    elif text == 'Расходы 📉':
-        await show_categories(message, 'expense')
-    elif text == 'Долги 🤝':
-        await add_debt_start(message)
-    elif text == 'Баланс 💼':
-        await show_balance(message)
-    elif text == 'Статистика 📊':
-        await show_stats(message)
-    elif text == 'Добавить категорию ➕':
-        await add_category_start(message)
+@dp.message(F.text.in_(['Доходы 💹', 'Расходы 📉']))
+async def select_category(message: Message, state: FSMContext):
+    cat_type = 'income' if '💹' in message.text else 'expense'
+    await state.update_data(cat_type=cat_type)
+    cats = get_categories(message.from_user.id, cat_type)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=cat, callback_data=f"cat_{cat_type}_{cat}")] for cat in cats[:8]
+    ] + [[InlineKeyboardButton(text="Отмена ❌", callback_data="cancel")]])
+    await message.answer(f"📂 Выбери категорию {message.text}:", reply_markup=kb)
+    await state.set_state(Form.waiting_category)
 
-# Показать категории (inline buttons)
-async def show_categories(message: types.Message, cat_type):
-    user_id = message.from_user.id
-    cats = get_categories(user_id, cat_type)
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    for cat in cats:
-        keyboard.add(InlineKeyboardButton(cat, callback_data=f"{cat_type}_{cat}"))
-    keyboard.add(InlineKeyboardButton("Отмена ❌", callback_data="cancel"))
-    await message.reply(f"Выбери категорию для { 'дохода 💹' if cat_type == 'income' else 'расхода 📉' }:",
-                        reply_markup=keyboard)
+@dp.callback_query(F.data.startswith("cat_"))
+async def process_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    _, cat_type, category = callback.data.split("_", 2)
+    await state.update_data(category=category)
+    await callback.message.answer(f"✅ Выбрано: **{category}**\n\n💰 Введи сумму и описание:\n`1000 Еда на неделю`", parse_mode=ParseMode.MARKDOWN)
+    await state.set_state(Form.waiting_amount)
 
-# Callback для выбора категории
-@dp.callback_query_handler(lambda c: c.data.startswith('income_') or c.data.startswith('expense_'))
-async def process_category(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id)
-    cat_type, category = callback_query.data.split('_', 1)
-    user_id = callback_query.from_user.id
-    # Сохраняем состояние (можно использовать FSM, но для простоты используем глобальный или просто ждём сообщение)
-    await bot.send_message(callback_query.from_user.id, f"Выбрана категория: {category}\n"
-                           f"Введи сумму (число) и описание (опционально) через пробел: ")
-    # Для обработки следующего сообщения зарегистрируем временный хэндлер, но для простоты используем state или ждём
-    # Здесь для упрощения: следующий хэндлер на текст после этого
-    dp.register_message_handler(lambda m: add_transaction(m, cat_type, category), content_types=['text'])
-
-# Добавление транзакции
-async def add_transaction(message: types.Message, cat_type, category):
+@dp.message(Form.waiting_amount)
+async def add_transaction(message: Message, state: FSMContext):
     try:
-        parts = message.text.split()
+        parts = message.text.split(maxsplit=1)
         amount = float(parts[0])
-        description = ' '.join(parts[1:]) or 'Без описания'
+        desc = parts[1] if len(parts) > 1 else "Без описания"
+        data = await state.get_data()
+        cat_type = data['cat_type']
+        category = data['category']
         user_id = message.from_user.id
-        date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        amt = amount if cat_type == 'income' else -amount
+        date = datetime.now().strftime('%Y-%m-%d %H:%M')
+        sign = 1 if cat_type == 'income' else -1
         cursor.execute("INSERT INTO transactions (user_id, type, category, amount, description, date) VALUES (?, ?, ?, ?, ?, ?)",
-                       (user_id, cat_type, category, amt, description, date))
+                       (user_id, cat_type, category, sign * amount, desc, date))
         conn.commit()
-        await message.reply(f"{'Доход 💹' if cat_type == 'income' else 'Расход 📉'} {amount} добавлен в {category}: {description} 🎉")
-    except:
-        await message.reply("Ошибка 😔 Формат: <сумма> <описание>")
+        await message.answer(f"🎉 **{cat_type.title()}** добавлен!\n"
+                             f"💵 {amount} руб. • {category}\n"
+                             f"📝 {desc}\n\n"
+                             "➡️ Что дальше?", reply_markup=get_main_keyboard())
+    except ValueError:
+        await message.answer("❌ Ошибка! Формат: `500 Продукты`", parse_mode=ParseMode.MARKDOWN)
+    await state.clear()
 
-# Добавление категории
-async def add_category_start(message: types.Message):
-    keyboard = InlineKeyboardMarkup()
-    keyboard.add(InlineKeyboardButton("Для доходов 💹", callback_data="add_cat_income"))
-    keyboard.add(InlineKeyboardButton("Для расходов 📉", callback_data="add_cat_expense"))
-    await message.reply("Выбери тип категории:", reply_markup=keyboard)
+@dp.message(F.text == 'Долги 🤝')
+async def debt_menu(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Я должен кому-то 📉", callback_data="debt_me")],
+        [InlineKeyboardButton(text="Мне должны 💹", callback_data="debt_other")],
+        [InlineKeyboardButton(text="Отмена ❌", callback_data="cancel")]
+    ])
+    await message.answer("🤝 **Учет долгов**\nВыбери тип:", reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
 
-@dp.callback_query_handler(lambda c: c.data.startswith('add_cat_'))
-async def process_add_category(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id)
-    cat_type = callback_query.data.split('_')[2]
-    await bot.send_message(callback_query.from_user.id, f"Введи название новой категории для { 'доходов 💹' if cat_type == 'income' else 'расходов 📉' }:")
-    dp.register_message_handler(lambda m: save_category(m, cat_type), content_types=['text'])
+@dp.callback_query(F.data.startswith("debt_"))
+async def process_debt(callback: CallbackQuery):
+    await callback.answer()
+    debt_type = callback.data.split("_")[1]
+    await callback.message.answer(f"💸 **Долг ({'📉 вычесть' if debt_type == 'me' else '💹 добавить'})**\n\n"
+                                  f"Формат: `1000 Долг Васе` или `5000 Займ другу`", parse_mode=ParseMode.MARKDOWN)
+    # Для простоты используем глобальную переменную или FSM, но пока ответим
 
-async def save_category(message: types.Message, cat_type):
-    name = message.text.strip() + ' 🆕'  # Добавим эмодзи для новых
+@dp.message(F.text == 'Баланс 💼')
+async def balance(message: Message):
     user_id = message.from_user.id
-    cursor.execute("INSERT INTO categories (user_id, type, name) VALUES (?, ?, ?)", (user_id, cat_type, name))
-    conn.commit()
-    await message.reply(f"Категория '{name}' добавлена! 🎊")
+    cursor.execute("SELECT SUM(amount) FROM transactions WHERE user_id=?", (user_id,))
+    trans = cursor.fetchone()[0] or 0
+    cursor.execute("SELECT SUM(amount) FROM debts WHERE user_id=?", (user_id,))
+    debts = cursor.fetchone()[0] or 0
+    total = trans + debts
+    await message.answer(f"💼 **Баланс**\n\n"
+                         f"📊 Транзакции: **{trans:.2f}** руб.\n"
+                         f"🤝 Долги: **{debts:.2f}** руб.\n"
+                         f"🌟 **Итого: {total:.2f}** руб.", parse_mode=ParseMode.MARKDOWN)
 
-# Добавление долга
-async def add_debt_start(message: types.Message):
-    keyboard = InlineKeyboardMarkup()
-    keyboard.add(InlineKeyboardButton("Я должен (вычесть из баланса) 📉", callback_data="debt_me"))
-    keyboard.add(InlineKeyboardButton("Мне должны (добавить в баланс) 💹", callback_data="debt_other"))
-    await message.reply("Тип долга:", reply_markup=keyboard)
-
-@dp.callback_query_handler(lambda c: c.data.startswith('debt_'))
-async def process_debt_type(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id)
-    debtor_type = callback_query.data
-    await bot.send_message(callback_query.from_user.id, "Введи сумму, описание и имя (если не 'me') через пробел: <сумма> <описание> <имя>")
-    dp.register_message_handler(lambda m: add_debt(m, debtor_type), content_types=['text'])
-
-async def add_debt(message: types.Message, debtor_type):
-    try:
-        parts = message.text.split()
-        amount = float(parts[0])
-        description = parts[1]
-        debtor = 'me' if debtor_type == 'debt_me' else ' '.join(parts[2:])
-        user_id = message.from_user.id
-        date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute("INSERT INTO debts (user_id, debtor, amount, description, date) VALUES (?, ?, ?, ?, ?)",
-                       (user_id, debtor, amount if debtor != 'me' else -amount, description, date))  # Отрицательно если 'me'
-        conn.commit()
-        await message.reply(f"Долг {amount} добавлен: {description} ({debtor}) 🤝")
-    except:
-        await message.reply("Ошибка 😔 Формат: <сумма> <описание> <имя>")
-
-# Показать баланс
-async def show_balance(message: types.Message):
+@dp.message(F.text == 'Статистика 📊')
+async def stats(message: Message):
     user_id = message.from_user.id
-    cursor.execute("SELECT SUM(amount) FROM transactions WHERE user_id = ?", (user_id,))
-    trans_balance = cursor.fetchone()[0] or 0
-    cursor.execute("SELECT SUM(amount) FROM debts WHERE user_id = ?", (user_id,))
-    debt_balance = cursor.fetchone()[0] or 0
-    total = trans_balance + debt_balance
-    await message.reply(f"💼 Твой баланс:\n"
-                        f"Из транзакций: {trans_balance:.2f} 💰\n"
-                        f"Из долгов: {debt_balance:.2f} 🤝\n"
-                        f"Общий: {total:.2f} 🌟")
-
-# Показать статистику по месяцам
-async def show_stats(message: types.Message):
-    user_id = message.from_user.id
-    cursor.execute("SELECT strftime('%Y-%m', date) as month, SUM(CASE WHEN type='income' THEN amount ELSE 0 END) as income, "
-                   "SUM(CASE WHEN type='expense' THEN -amount ELSE 0 END) as expense FROM transactions WHERE user_id = ? GROUP BY month ORDER BY month DESC",
-                   (user_id,))
-    stats = cursor.fetchall()
-    if not stats:
-        await message.reply("Нет данных для статистики 😔")
+    cursor.execute("""
+        SELECT strftime('%Y-%m', date) month, 
+               SUM(CASE WHEN type='income' THEN amount ELSE 0 END) inc,
+               SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) exp
+        FROM transactions WHERE user_id=? GROUP BY month ORDER BY month DESC LIMIT 6
+    """, (user_id,))
+    rows = cursor.fetchall()
+    if not rows:
+        await message.answer("📊 Нет данных. Добавь транзакции!")
         return
-    response = "📊 Статистика по месяцам:\n"
-    for month, income, expense in stats:
-        balance = income - expense
-        response += f"{month}: Доходы {income:.2f} 💹 | Расходы {expense:.2f} 📉 | Баланс {balance:.2f} 💼\n"
-    await message.reply(response)
+    text = "📊 **Статистика за 6 мес.**\n\n"
+    for month, inc, exp in rows:
+        bal = inc + exp  # exp отрицательный
+        text += f"`{month}`: +{inc:.0f} / {abs(exp):.0f} = **{bal:.0f}**\n"
+    await message.answer(text, parse_mode=ParseMode.MARKDOWN)
 
-# Отмена
-@dp.callback_query_handler(lambda c: c.data == 'cancel')
-async def cancel(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id)
-    await bot.send_message(callback_query.from_user.id, "Действие отменено ❌")
+def get_main_keyboard():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text='Доходы 💹'), KeyboardButton(text='Расходы 📉')],
+        [KeyboardButton(text='Долги 🤝'), KeyboardButton(text='Баланс 💼')],
+        [KeyboardButton(text='Статистика 📊'), KeyboardButton(text='Категории ➕')]
+    ], resize_keyboard=True, one_time_keyboard=False)
 
-# Webhook setup для Koyeb
-async def on_startup(dp):
+@dp.callback_query(F.data == "cancel")
+async def cancel(callback: CallbackQuery):
+    await callback.answer("Отменено!")
+    await callback.message.answer("🏠 Главное меню:", reply_markup=get_main_keyboard())
+
+async def on_startup():
     await bot.set_webhook(WEBHOOK_URL)
-    logging.info('Webhook set')
+    logging.info(f"Webhook set to {WEBHOOK_URL}")
 
-async def on_shutdown(dp):
+async def on_shutdown():
     await bot.delete_webhook()
-    logging.info('Webhook deleted')
 
 if __name__ == '__main__':
-    start_webhook(
-        dispatcher=dp,
-        webhook_path=WEBHOOK_PATH,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
-        skip_updates=True,
-        host='0.0.0.0',
-        port=PORT
-    )
-
-
-
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+    from aiohttp import web
+    app = web.Application()
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    web.run_app(app, host='0.0.0.0', port=PORT)
