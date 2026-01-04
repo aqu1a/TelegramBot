@@ -30,10 +30,10 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# --------------------- SQLite ---------------------
 conn = sqlite3.connect("finance.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# ------------------- Таблицы -------------------
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     date TEXT
 )
 """)
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS debts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS debts (
     date TEXT
 )
 """)
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +66,7 @@ CREATE TABLE IF NOT EXISTS categories (
 """)
 conn.commit()
 
-# ------------------- Категории -------------------
+# --------------------- Категории ---------------------
 DEFAULT_INCOME = [
     "Зарплата 💼", "Аванс 💰", "Премия 🎉", "Фриланс 💻",
     "Подарок 🎁", "Кэшбэк 💸", "Проценты по вкладу 📈", "Дивиденды 📊",
@@ -88,7 +90,7 @@ def get_categories(user_id: int, typ: str):
     custom = [r[0] for r in cursor.fetchall()]
     return (DEFAULT_INCOME + custom) if typ == "income" else (DEFAULT_EXPENSE + custom)
 
-# ------------------- Состояния -------------------
+# --------------------- Состояния ---------------------
 class States(StatesGroup):
     choosing_category = State()
     entering_amount = State()
@@ -97,7 +99,7 @@ class States(StatesGroup):
     choosing_debt_type = State()
     entering_debt_amount = State()
 
-# ------------------- Главное меню -------------------
+# --------------------- Главное меню ---------------------
 def main_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="Доходы 💹"), KeyboardButton(text="Расходы 📉")],
@@ -105,7 +107,7 @@ def main_kb():
         [KeyboardButton(text="Статистика 📊"), KeyboardButton(text="Категории ➕")]
     ], resize_keyboard=True)
 
-# ------------------- Старт -------------------
+# --------------------- Старт ---------------------
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
@@ -120,7 +122,7 @@ async def cmd_start(message: Message):
         reply_markup=main_kb()
     )
 
-# ------------------- Доходы / Расходы -------------------
+# --------------------- Доходы / Расходы ---------------------
 @dp.message(F.text.in_(["Доходы 💹", "Расходы 📉"]))
 async def choose_category(message: Message, state: FSMContext):
     typ = "income" if "Доходы" in message.text else "expense"
@@ -141,8 +143,7 @@ async def category_selected(callback: CallbackQuery, state: FSMContext):
     await state.update_data(category=cat)
     await callback.message.edit_text(
         f"✅ Категория: <b>{cat}</b>\n\n"
-        f"💰 Теперь введи сумму (только число):\n"
-        f"<code>2500</code> или <code>499.50</code>",
+        f"💰 Теперь введи сумму (только число):\n<code>2500</code> или <code>499.50</code>",
         parse_mode=ParseMode.HTML
     )
     await state.set_state(States.entering_amount)
@@ -170,19 +171,20 @@ async def add_transaction(message: Message, state: FSMContext):
             reply_markup=main_kb()
         )
     except ValueError:
-        await message.answer("❌ Введи корректную сумму (число > 0)\nПример: <code>1200</code>", parse_mode=ParseMode.HTML)
+        await message.answer("❌ Введи корректную сумму (число > 0)", parse_mode=ParseMode.HTML)
         return
     await state.clear()
 
-# ------------------- Долги -------------------
+# --------------------- Долги ---------------------
 @dp.message(F.text == "Долги 🤝")
 async def debt_start(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Я должен 📉", callback_data="debt_me")],
         [InlineKeyboardButton(text="Мне должны 💹", callback_data="debt_other")],
+        [InlineKeyboardButton(text="Информация о долгах ℹ️", callback_data="debt_info")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
     ])
-    await message.answer("🤝 Выбери тип долга:", reply_markup=kb)
+    await message.answer("🤝 Выбери действие с долгами:", reply_markup=kb)
     await state.set_state(States.choosing_debt_type)
 
 @dp.callback_query(F.data.in_(["debt_me", "debt_other"]))
@@ -196,6 +198,20 @@ async def debt_type_selected(callback: CallbackQuery, state: FSMContext):
         parse_mode=ParseMode.HTML
     )
     await state.set_state(States.entering_debt_amount)
+
+@dp.callback_query(F.data == "debt_info")
+async def debt_info(callback: CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    cursor.execute("SELECT debtor, amount, description, date FROM debts WHERE user_id=?", (uid,))
+    rows = cursor.fetchall()
+    if not rows:
+        await callback.message.answer("ℹ️ Долгов пока нет.", reply_markup=main_kb())
+        return
+    text = "ℹ️ <b>Информация о долгах:</b>\n\n"
+    for debtor, amount, desc, date in rows:
+        text += f"{desc} │ {amount:.2f} сўм │ {debtor} │ {date}\n"
+    await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=main_kb())
 
 @dp.message(States.entering_debt_amount)
 async def add_debt(message: Message, state: FSMContext):
@@ -222,7 +238,7 @@ async def add_debt(message: Message, state: FSMContext):
         return
     await state.clear()
 
-# ------------------- Категории -------------------
+# --------------------- Категории ---------------------
 @dp.message(F.text == "Категории ➕")
 async def add_category_start(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -230,7 +246,7 @@ async def add_category_start(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="Расходы 📉", callback_data="newcat_expense")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
     ])
-    await message.answer("➕ Для какого типа добавить свою категорию?", reply_markup=kb)
+    await message.answer("➕ Для какого типа добавить категорию?", reply_markup=kb)
     await state.set_state(States.adding_category_type)
 
 @dp.callback_query(F.data.startswith("newcat_"))
@@ -238,7 +254,7 @@ async def add_category_type(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     typ = callback.data.split("_")[1]
     await state.update_data(cat_type=typ)
-    await callback.message.edit_text(f"📝 Введи название новой категории (без эмодзи):")
+    await callback.message.edit_text("📝 Введи название новой категории (без эмодзи):")
     await state.set_state(States.entering_category_name)
 
 @dp.message(States.entering_category_name)
@@ -258,7 +274,7 @@ async def save_new_category(message: Message, state: FSMContext):
         await message.answer("❌ Такая категория уже существует!", reply_markup=main_kb())
     await state.clear()
 
-# ------------------- Баланс -------------------
+# --------------------- Баланс ---------------------
 @dp.message(F.text == "Баланс 💼")
 async def show_balance(message: Message):
     uid = message.from_user.id
@@ -274,12 +290,12 @@ async def show_balance(message: Message):
         f"📊 Доходы: <b>{income:.2f} сўм</b>\n"
         f"📉 Расходы: <b>{expense:.2f} сўм</b>\n"
         f"🤝 Долги: <b>{debt:.2f} сўм</b>\n"
-        f"🌟 <b>Баланс (доходы − расходы): {balance:.2f} сўм</b>",
+        f"🌟 <b>Баланс (Доходы − Расходы): {balance:.2f} сўм</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=main_kb()
     )
 
-# ------------------- Статистика -------------------
+# --------------------- Статистика ---------------------
 @dp.message(F.text == "Статистика 📊")
 async def show_stats(message: Message):
     uid = message.from_user.id
@@ -313,7 +329,7 @@ async def show_stats(message: Message):
         text += f"<code>{month}</code> │ Доход: {inc:.0f} │ Расход: {exp:.0f} │ Долги: {debt:.0f} │ <b>Баланс: {bal:.0f}</b>\n"
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=main_kb())
 
-# ------------------- Отмена -------------------
+# --------------------- Отмена ---------------------
 @dp.callback_query(F.data == "cancel")
 async def cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Отменено")
@@ -321,12 +337,12 @@ async def cancel(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("🏠 Главное меню:", reply_markup=None)
     await callback.message.answer("Выбери действие:", reply_markup=main_kb())
 
-# ------------------- Неизвестные сообщения -------------------
+# --------------------- Неизвестные сообщения ---------------------
 @dp.message()
 async def unknown_message(message: Message):
     await message.answer("❓ Не понял. Используй кнопки ниже или команду /start", reply_markup=main_kb())
 
-# ------------------- Webhook -------------------
+# --------------------- Webhook ---------------------
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
     logging.info(f"Webhook set to {WEBHOOK_URL}")
