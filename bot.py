@@ -157,16 +157,15 @@ async def add_transaction(message: Message, state: FSMContext):
         data = await state.get_data()
         typ = data["type"]
         cat = data["category"]
-        sign = 1 if typ == "income" else -1
         cursor.execute(
             "INSERT INTO transactions (user_id, type, category, amount, date) VALUES (?, ?, ?, ?, ?)",
-            (message.from_user.id, typ, cat, sign * amount, datetime.now().strftime("%Y-%m-%d %H:%M"))
+            (message.from_user.id, typ, cat, amount, datetime.now().strftime("%Y-%m-%d %H:%M"))
         )
         conn.commit()
         emoji = "💹" if typ == "income" else "📉"
         await message.answer(
             f"{emoji} <b>{'Доход' if typ=='income' else 'Расход'}</b> добавлен!\n"
-            f"💰 <b>{amount} сўм</b> → {cat}",
+            f"💰 <b>{amount:.2f} сўм</b> → {cat}",
             parse_mode=ParseMode.HTML,
             reply_markup=main_kb()
         )
@@ -192,8 +191,7 @@ async def debt_type_selected(callback: CallbackQuery, state: FSMContext):
     is_me = callback.data == "debt_me"
     await state.update_data(is_me=is_me)
     await callback.message.edit_text(
-        f"💸 Введи сумму долга (только число):\n"
-        f"<code>5000</code>\n\n"
+        f"💸 Введи сумму долга (только число):\n<code>5000</code>\n\n"
         f"{'Я должен (-)' if is_me else 'Мне должны (+)'}",
         parse_mode=ParseMode.HTML
     )
@@ -215,7 +213,7 @@ async def add_debt(message: Message, state: FSMContext):
         )
         conn.commit()
         await message.answer(
-            f"🤝 Долг записан: <b>{amount} сўм</b> ({'я должен' if data['is_me'] else 'мне должны'})",
+            f"🤝 Долг записан: <b>{amount:.2f} сўм</b> ({'я должен' if data['is_me'] else 'мне должны'})",
             parse_mode=ParseMode.HTML,
             reply_markup=main_kb()
         )
@@ -264,23 +262,19 @@ async def save_new_category(message: Message, state: FSMContext):
 @dp.message(F.text == "Баланс 💼")
 async def show_balance(message: Message):
     uid = message.from_user.id
-    # Доходы и расходы
-    cursor.execute("SELECT SUM(amount) FROM transactions WHERE user_id=?", (uid,))
-    trans = cursor.fetchone()[0] or 0
-    cursor.execute("SELECT SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) FROM transactions WHERE user_id=?", (uid,))
+    cursor.execute("SELECT SUM(CASE WHEN type='income' THEN amount ELSE 0 END) FROM transactions WHERE user_id=?", (uid,))
     income = cursor.fetchone()[0] or 0
-    cursor.execute("SELECT SUM(CASE WHEN amount<0 THEN amount ELSE 0 END) FROM transactions WHERE user_id=?", (uid,))
+    cursor.execute("SELECT SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) FROM transactions WHERE user_id=?", (uid,))
     expense = cursor.fetchone()[0] or 0
-    # Долги
     cursor.execute("SELECT SUM(amount) FROM debts WHERE user_id=?", (uid,))
     debt = cursor.fetchone()[0] or 0
-    total = trans  # Доходы + расходы, долги отдельно
+    balance = income - expense
     await message.answer(
         f"💼 <b>Твой текущий баланс</b>\n\n"
         f"📊 Доходы: <b>{income:.2f} сўм</b>\n"
-        f"📉 Расходы: <b>{abs(expense):.2f} сўм</b>\n"
+        f"📉 Расходы: <b>{expense:.2f} сўм</b>\n"
         f"🤝 Долги: <b>{debt:.2f} сўм</b>\n"
-        f"🌟 <b>Итого доступно (без долгов): {total:.2f} сўм</b>",
+        f"🌟 <b>Баланс (доходы − расходы): {balance:.2f} сўм</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=main_kb()
     )
@@ -292,30 +286,30 @@ async def show_stats(message: Message):
     cursor.execute("""
         SELECT strftime('%Y-%m', date) AS month,
                SUM(CASE WHEN type='income' THEN amount ELSE 0 END) AS inc,
-               SUM(CASE WHEN type='expense' THEN -amount ELSE 0 END) AS exp
+               SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) AS exp
         FROM transactions
         WHERE user_id=?
         GROUP BY month
         ORDER BY month DESC
         LIMIT 6
     """, (uid,))
-    rows = cursor.fetchall()
-    
+    trans_rows = cursor.fetchall()
+
     cursor.execute("""
-        SELECT strftime('%Y-%m', date) AS month, SUM(amount) FROM debts
-        WHERE user_id=?
+        SELECT strftime('%Y-%m', date) AS month, SUM(amount) 
+        FROM debts WHERE user_id=? 
         GROUP BY month
     """, (uid,))
     debts_rows = {r[0]: r[1] for r in cursor.fetchall()}
 
-    if not rows:
+    if not trans_rows:
         await message.answer("📊 Пока нет данных. Добавь доходы или расходы!", reply_markup=main_kb())
         return
 
     text = "📊 <b>Статистика за последние месяцы</b>\n\n"
-    for month, inc, exp in rows:
+    for month, inc, exp in trans_rows:
         debt = debts_rows.get(month, 0)
-        bal = inc - exp  # чистый доход за месяц
+        bal = inc - exp
         text += f"<code>{month}</code> │ Доход: {inc:.0f} │ Расход: {exp:.0f} │ Долги: {debt:.0f} │ <b>Баланс: {bal:.0f}</b>\n"
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=main_kb())
 
@@ -351,4 +345,3 @@ if __name__ == "__main__":
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     web.run_app(app, host="0.0.0.0", port=PORT)
-
