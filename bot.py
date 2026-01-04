@@ -192,11 +192,11 @@ async def cancel(callback: CallbackQuery):
     await callback.answer("Отменено!")
     await callback.message.answer("🏠 Главное меню:", reply_markup=get_main_keyboard())
 
-async def on_startup():
+async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
     logging.info(f"Webhook set to {WEBHOOK_URL}")
 
-async def on_shutdown():
+async def on_shutdown(app):
     await bot.delete_webhook()
 
 if __name__ == '__main__':
@@ -208,3 +208,4 @@ if __name__ == '__main__':
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     web.run_app(app, host='0.0.0.0', port=PORT)
+
