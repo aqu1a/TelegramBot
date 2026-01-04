@@ -163,7 +163,7 @@ async def add_transaction(message: Message, state: FSMContext):
         emoji = "💹" if typ == "income" else "📉"
         await message.answer(
             f"{emoji} <b>{'Доход' if typ=='income' else 'Расход'}</b> добавлен!\n"
-            f"💰 <b>{amount} ₽</b> → {cat}",
+            f"💰 <b>{amount} сўм</b> → {cat}",
             parse_mode=ParseMode.HTML,
             reply_markup=main_kb()
         )
@@ -211,7 +211,7 @@ async def add_debt(message: Message, state: FSMContext):
         )
         conn.commit()
         await message.answer(
-            f"🤝 Долг записан: <b>{amount} ₽</b> ({'я должен' if data['is_me'] else 'мне должны'})",
+            f"🤝 Долг записан: <b>{amount} сўм</b> ({'я должен' if data['is_me'] else 'мне должны'})",
             parse_mode=ParseMode.HTML,
             reply_markup=main_kb()
         )
@@ -265,9 +265,9 @@ async def show_balance(message: Message):
     total = trans + debt
     await message.answer(
         f"💼 <b>Твой текущий баланс</b>\n\n"
-        f"📊 Доходы − Расходы: <b>{trans:+.2f} ₽</b>\n"
-        f"🤝 Учёт долгов: <b>{debt:+.2f} ₽</b>\n"
-        f"🌟 <b>Итого доступно: {total:.2f} ₽</b>",
+        f"📊 Доходы − Расходы: <b>{trans:+.2f} сўм</b>\n"
+        f"🤝 Учёт долгов: <b>{debt:+.2f} сўм</b>\n"
+        f"🌟 <b>Итого доступно: {total:.2f} сўм</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=main_kb()
     )
@@ -278,7 +278,7 @@ async def show_stats(message: Message):
     cursor.execute("""
         SELECT strftime('%Y-%m', date) AS month,
                SUM(CASE WHEN type='income' THEN amount ELSE 0 END) AS inc,
-               SUM(CASE WHEN type='expense' THEN -amount ELSE 0 END) AS exp
+               SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) AS exp
         FROM transactions WHERE user_id=? 
         GROUP BY month ORDER BY month DESC LIMIT 6
     """, (uid,))
@@ -288,8 +288,8 @@ async def show_stats(message: Message):
         return
     text = "📊 <b>Статистика за последние месяцы</b>\n\n"
     for month, inc, exp in rows:
-        bal = inc - exp
-        text += f"<code>{month}</code> │ +{inc:.0f} │ -{exp:.0f} │ <b>{bal:+.0f} ₽</b>\n"
+        bal = inc + exp  # exp is negative
+        text += f"<code>{month}</code> │ +{inc:.0f} │ {exp:.0f} │ <b>{bal:+.0f} сўм</b>\n"
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=main_kb())
 
 @dp.callback_query(F.data == "cancel")
@@ -322,4 +322,3 @@ if __name__ == "__main__":
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     web.run_app(app, host="0.0.0.0", port=PORT)
-
