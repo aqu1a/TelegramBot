@@ -33,7 +33,7 @@ dp = Dispatcher(storage=storage)
 conn = sqlite3.connect("finance.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Таблицы
+# ------------------- Таблицы -------------------
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS categories (
 """)
 conn.commit()
 
-# Много готовых категорий на все случаи жизни
+# ------------------- Категории -------------------
 DEFAULT_INCOME = [
     "Зарплата 💼", "Аванс 💰", "Премия 🎉", "Фриланс 💻",
     "Подарок 🎁", "Кэшбэк 💸", "Проценты по вкладу 📈", "Дивиденды 📊",
@@ -88,6 +88,7 @@ def get_categories(user_id: int, typ: str):
     custom = [r[0] for r in cursor.fetchall()]
     return (DEFAULT_INCOME + custom) if typ == "income" else (DEFAULT_EXPENSE + custom)
 
+# ------------------- Состояния -------------------
 class States(StatesGroup):
     choosing_category = State()
     entering_amount = State()
@@ -96,6 +97,7 @@ class States(StatesGroup):
     choosing_debt_type = State()
     entering_debt_amount = State()
 
+# ------------------- Главное меню -------------------
 def main_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="Доходы 💹"), KeyboardButton(text="Расходы 📉")],
@@ -103,6 +105,7 @@ def main_kb():
         [KeyboardButton(text="Статистика 📊"), KeyboardButton(text="Категории ➕")]
     ], resize_keyboard=True)
 
+# ------------------- Старт -------------------
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
@@ -117,12 +120,12 @@ async def cmd_start(message: Message):
         reply_markup=main_kb()
     )
 
+# ------------------- Доходы / Расходы -------------------
 @dp.message(F.text.in_(["Доходы 💹", "Расходы 📉"]))
 async def choose_category(message: Message, state: FSMContext):
     typ = "income" if "Доходы" in message.text else "expense"
     await state.update_data(type=typ)
     cats = get_categories(message.from_user.id, typ)
-    # Делаем кнопки по 2 в ряд
     rows = [cats[i:i+2] for i in range(0, len(cats), 2)]
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=c, callback_data=f"cat_{typ}_{c}") for c in row]
@@ -138,7 +141,7 @@ async def category_selected(callback: CallbackQuery, state: FSMContext):
     await state.update_data(category=cat)
     await callback.message.edit_text(
         f"✅ Категория: <b>{cat}</b>\n\n"
-        f"💰 Теперь просто введи сумму (только число):\n"
+        f"💰 Теперь введи сумму (только число):\n"
         f"<code>2500</code> или <code>499.50</code>",
         parse_mode=ParseMode.HTML
     )
@@ -168,10 +171,11 @@ async def add_transaction(message: Message, state: FSMContext):
             reply_markup=main_kb()
         )
     except ValueError:
-        await message.answer("❌ Введи корректную сумму (только число > 0)\nПример: <code>1200</code> или <code>599.99</code>", parse_mode=ParseMode.HTML)
+        await message.answer("❌ Введи корректную сумму (число > 0)\nПример: <code>1200</code>", parse_mode=ParseMode.HTML)
         return
     await state.clear()
 
+# ------------------- Долги -------------------
 @dp.message(F.text == "Долги 🤝")
 async def debt_start(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -220,6 +224,7 @@ async def add_debt(message: Message, state: FSMContext):
         return
     await state.clear()
 
+# ------------------- Категории -------------------
 @dp.message(F.text == "Категории ➕")
 async def add_category_start(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -255,43 +260,66 @@ async def save_new_category(message: Message, state: FSMContext):
         await message.answer("❌ Такая категория уже существует!", reply_markup=main_kb())
     await state.clear()
 
+# ------------------- Баланс -------------------
 @dp.message(F.text == "Баланс 💼")
 async def show_balance(message: Message):
     uid = message.from_user.id
+    # Доходы и расходы
     cursor.execute("SELECT SUM(amount) FROM transactions WHERE user_id=?", (uid,))
     trans = cursor.fetchone()[0] or 0
+    cursor.execute("SELECT SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) FROM transactions WHERE user_id=?", (uid,))
+    income = cursor.fetchone()[0] or 0
+    cursor.execute("SELECT SUM(CASE WHEN amount<0 THEN amount ELSE 0 END) FROM transactions WHERE user_id=?", (uid,))
+    expense = cursor.fetchone()[0] or 0
+    # Долги
     cursor.execute("SELECT SUM(amount) FROM debts WHERE user_id=?", (uid,))
     debt = cursor.fetchone()[0] or 0
-    total = trans + debt
+    total = trans  # Доходы + расходы, долги отдельно
     await message.answer(
         f"💼 <b>Твой текущий баланс</b>\n\n"
-        f"📊 Доходы − Расходы: <b>{trans:+.2f} сўм</b>\n"
-        f"🤝 Учёт долгов: <b>{debt:+.2f} сўм</b>\n"
-        f"🌟 <b>Итого доступно: {total:.2f} сўм</b>",
+        f"📊 Доходы: <b>{income:.2f} сўм</b>\n"
+        f"📉 Расходы: <b>{abs(expense):.2f} сўм</b>\n"
+        f"🤝 Долги: <b>{debt:.2f} сўм</b>\n"
+        f"🌟 <b>Итого доступно (без долгов): {total:.2f} сўм</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=main_kb()
     )
 
+# ------------------- Статистика -------------------
 @dp.message(F.text == "Статистика 📊")
 async def show_stats(message: Message):
     uid = message.from_user.id
     cursor.execute("""
         SELECT strftime('%Y-%m', date) AS month,
                SUM(CASE WHEN type='income' THEN amount ELSE 0 END) AS inc,
-               SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) AS exp
-        FROM transactions WHERE user_id=? 
-        GROUP BY month ORDER BY month DESC LIMIT 6
+               SUM(CASE WHEN type='expense' THEN -amount ELSE 0 END) AS exp
+        FROM transactions
+        WHERE user_id=?
+        GROUP BY month
+        ORDER BY month DESC
+        LIMIT 6
     """, (uid,))
     rows = cursor.fetchall()
+    
+    cursor.execute("""
+        SELECT strftime('%Y-%m', date) AS month, SUM(amount) FROM debts
+        WHERE user_id=?
+        GROUP BY month
+    """, (uid,))
+    debts_rows = {r[0]: r[1] for r in cursor.fetchall()}
+
     if not rows:
         await message.answer("📊 Пока нет данных. Добавь доходы или расходы!", reply_markup=main_kb())
         return
+
     text = "📊 <b>Статистика за последние месяцы</b>\n\n"
     for month, inc, exp in rows:
-        bal = inc + exp  # exp is negative
-        text += f"<code>{month}</code> │ +{inc:.0f} │ {exp:.0f} │ <b>{bal:+.0f} сўм</b>\n"
+        debt = debts_rows.get(month, 0)
+        bal = inc - exp  # чистый доход за месяц
+        text += f"<code>{month}</code> │ Доход: {inc:.0f} │ Расход: {exp:.0f} │ Долги: {debt:.0f} │ <b>Баланс: {bal:.0f}</b>\n"
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=main_kb())
 
+# ------------------- Отмена -------------------
 @dp.callback_query(F.data == "cancel")
 async def cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Отменено")
@@ -299,11 +327,12 @@ async def cancel(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("🏠 Главное меню:", reply_markup=None)
     await callback.message.answer("Выбери действие:", reply_markup=main_kb())
 
-# Ловим все неизвестные сообщения
+# ------------------- Неизвестные сообщения -------------------
 @dp.message()
 async def unknown_message(message: Message):
     await message.answer("❓ Не понял. Используй кнопки ниже или команду /start", reply_markup=main_kb())
 
+# ------------------- Webhook -------------------
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
     logging.info(f"Webhook set to {WEBHOOK_URL}")
@@ -322,3 +351,4 @@ if __name__ == "__main__":
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     web.run_app(app, host="0.0.0.0", port=PORT)
+
