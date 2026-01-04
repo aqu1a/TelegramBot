@@ -10,7 +10,7 @@ from datetime import datetime
 # Получаем токен и порт из переменных окружения (для Koyeb)
 TOKEN = os.getenv('TOKEN')  # Установи в Koyeb как env variable
 PORT = int(os.getenv('PORT', 8443))
-WEBHOOK_HOST = 'https://твой-приложение-на-koyeb.koyeb.app'  # Замени на реальный URL от Koyeb (после деплоя)
+WEBHOOK_HOST = 'https://juicy-cloe-koshelyok-f7177eb6.koyeb.app'
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
@@ -244,3 +244,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=PORT
     )
+
