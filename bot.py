@@ -402,40 +402,49 @@ async def save_new_category(message: Message, state: FSMContext):
     await state.clear()
 
 # ===================== Баланс =====================
-
 @dp.message(F.text == "Баланс 💼")
 async def balance(message: Message):
     uid = message.from_user.id
-    with db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                  COALESCE(SUM(CASE WHEN type='income' THEN amount END),0) AS inc,
-                  COALESCE(SUM(CASE WHEN type='expense' THEN amount END),0) AS exp
-                FROM transactions WHERE user_id=%s
-            """, (uid,))
-            row = cur.fetchone()
+    try:
+        with db() as conn:
+            with conn.cursor() as cur:
+                # Получаем доходы и расходы
+                cur.execute("""
+                    SELECT
+                      COALESCE(SUM(CASE WHEN type='income' THEN amount END),0) AS inc,
+                      COALESCE(SUM(CASE WHEN type='expense' THEN amount END),0) AS exp
+                    FROM transactions WHERE user_id=%s
+                """, (uid,))
+                row = cur.fetchone()
 
-            cur.execute("SELECT COALESCE(SUM(amount),0) AS debt FROM debts WHERE user_id=%s", (uid,))
-            debt = cur.fetchone()["debt"]
+                # Получаем долги
+                cur.execute("SELECT COALESCE(SUM(amount),0) AS debt FROM debts WHERE user_id=%s", (uid,))
+                debt = cur.fetchone()["debt"]
 
-    cash_balance = row["inc"] - row["exp"]
-    full_balance = cash_balance + debt
+        # Рассчитываем балансы
+        cash_balance = row["inc"] - row["exp"]
+        full_balance = cash_balance + debt
 
-    await message.answer(
-        f"💼 <b>Баланс</b>\n\n"
-        f"💹 Доходы: {row['inc']:.2f}\n"
-        f"📉 Расходы: {row['exp']:.2f}\n"
-        f"💰 Денежный баланс: {cash_balance:.2f}\n"
-        f"🤝 Долги (нетто): {debt:+.2f}\n"
-        f"⭐ С учётом долгов: {full_balance:.2f}",
-        reply_markup=main_kb()
-    )
+        # Отправляем пользователю
+        await message.answer(
+            f"💼 <b>Баланс</b>\n\n"
+            f"💹 Доходы: {row['inc']:.2f}\n"
+            f"📉 Расходы: {row['exp']:.2f}\n"
+            f"💰 Денежный баланс: {cash_balance:.2f}\n"
+            f"🤝 Долги (нетто): {debt:+.2f}\n"
+            f"⭐ С учётом долгов: {full_balance:.2f}",
+            reply_markup=main_kb()
+        )
+
     except Exception as e:
         logging.error(f"Balance error: {e}", exc_info=True)
         await message.answer("❌ Ошибка при расчёте баланса. Попробуй позже.")
+
     finally:
-        conn.close()
+        if "conn" in locals():
+            conn.close()
+
+
 
 # ================= СТАТИСТИКА =================
 
@@ -597,3 +606,4 @@ if __name__ == "__main__":
     app.on_shutdown.append(on_shutdown)
 
     web.run_app(app, host="0.0.0.0", port=PORT)
+
