@@ -591,8 +591,8 @@ async def show_balance(message: Message):
 @dp.message(F.text == "Статистика 📊")
 async def show_stats_start(message: Message, state: FSMContext):
     await message.answer(
-        "📊 Введи месяц для статистики в формате YYYY-MM (например, 2026-01).\n"
-        "Или напиши <code>all</code> для последних 6 месяцев.",
+        "📊 Введи месяц для статистики в формате <code>YYYY-MM</code> (например, 2026-01).\n\n"
+        "Или напиши <code>all</code> для статистики за последние 6 месяцев.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
         ])
@@ -606,17 +606,19 @@ async def show_stats(message: Message, state: FSMContext):
     uid = message.from_user.id
     conn = get_db_connection()
     if not conn:
-        await message.answer("❌ Ошибка базы данных.")
+        await message.answer("❌ Ошибка связи с базой данных. Попробуй позже.")
         await state.clear()
         return
 
     try:
         if month_input.lower() == 'all':
+            # Последние 6 месяцев с транзакциями
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT to_char(CAST(date AS timestamp), 'YYYY-MM') AS month,
-                           COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END), 0) AS inc,
-                           COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END), 0) AS exp
+                    SELECT 
+                        to_char(CAST(date AS timestamp), 'YYYY-MM') AS month,
+                        COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END), 0) AS inc,
+                        COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END), 0) AS exp
                     FROM transactions
                     WHERE user_id=%s
                     GROUP BY month
@@ -625,69 +627,82 @@ async def show_stats(message: Message, state: FSMContext):
                 """, (uid,))
                 trans_rows = cur.fetchall()
 
+                # Долги по месяцам (для дополнения)
                 cur.execute("""
-                    SELECT to_char(CAST(date AS timestamp), 'YYYY-MM') AS month,
-                           COALESCE(SUM(amount), 0) AS debt_sum
-                    FROM debts WHERE user_id=%s
+                    SELECT 
+                        to_char(CAST(date AS timestamp), 'YYYY-MM') AS month,
+                        COALESCE(SUM(amount), 0) AS debt_sum
+                    FROM debts 
+                    WHERE user_id=%s
                     GROUP BY month
                     ORDER BY month DESC
                 """, (uid,))
                 debt_dict = {row['month']: row['debt_sum'] for row in cur.fetchall()}
 
             if not trans_rows:
-                await message.answer("📊 Пока нет данных для статистики.", reply_markup=main_kb())
+                await message.answer("📊 Пока нет данных для статистики. Добавь доходы или расходы!", reply_markup=main_kb())
                 await state.clear()
                 return
 
             text = "📊 <b>Статистика за последние 6 месяцев</b>\n\n"
             for row in trans_rows:
                 debt = debt_dict.get(row['month'], 0.0)
-                bal = row['inc'] - row['exp']
-                text += (f"<code>{row['month']}</code> │ "
-                         f"Доход: {row['inc']:.0f} │ "
-                         f"Расход: {row['exp']:.0f} │ "
-                         f"Долги: {debt:+.0f} │ "
-                         f"<b>Баланс: {bal:.0f}</b>\n")
+                balance = row['inc'] - row['exp']
+                text += (
+                    f"<code>{row['month']}</code> │ "
+                    f"Доход: <b>{row['inc']:.0f}</b> │ "
+                    f"Расход: <b>{row['exp']:.0f}</b> │ "
+                    f"Долги: <b>{debt:+.0f}</b> │ "
+                    f"Баланс: <b>{balance:.0f}</b> сўм\n"
+                )
+
         else:
+            # Конкретный месяц
             try:
                 datetime.strptime(month_input, "%Y-%m")
             except ValueError:
-                await message.answer("❌ Некорректный формат. Используй YYYY-MM, например 2026-01")
+                await message.answer("❌ Некорректный формат. Используй YYYY-MM, например: <code>2026-01</code>")
                 return
 
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END), 0) AS inc,
-                           COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END), 0) AS exp
+                    SELECT 
+                        COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END), 0) AS inc,
+                        COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END), 0) AS exp
                     FROM transactions
-                    WHERE user_id=%s AND to_char(CAST(date AS timestamp), 'YYYY-MM') = %s
+                    WHERE user_id=%s 
+                      AND to_char(CAST(date AS timestamp), 'YYYY-MM') = %s
                 """, (uid, month_input))
                 row = cur.fetchone()
                 inc = row['inc']
                 exp = row['exp']
 
                 cur.execute("""
-                    SELECT COALESCE(SUM(amount), 0) FROM debts
-                    WHERE user_id=%s AND to_char(CAST(date AS timestamp), 'YYYY-MM') = %s
+                    SELECT COALESCE(SUM(amount), 0)
+                    FROM debts
+                    WHERE user_id=%s 
+                      AND to_char(CAST(date AS timestamp), 'YYYY-MM') = %s
                 """, (uid, month_input))
                 debt = cur.fetchone()[0]
 
-                bal = inc - exp
-                text = f"📊 <b>Статистика за {month_input}</b>\n\n"
-                text += (f"Доход: {inc:.0f} │ "
-                         f"Расход: {exp:.0f} │ "
-                         f"Долги: {debt:+.0f} │ "
-                         f"<b>Баланс: {bal:.0f}</b>")
+            balance = inc - exp
+            text = f"📊 <b>Статистика за {month_input}</b>\n\n"
+            text += (
+                f"Доход: <b>{inc:.0f}</b> │ "
+                f"Расход: <b>{exp:.0f}</b> │ "
+                f"Долги: <b>{debt:+.0f}</b> │ "
+                f"Баланс: <b>{balance:.0f}</b> сўм"
+            )
 
         await message.answer(text, reply_markup=main_kb())
+
     except Exception as e:
-        logging.error(f"Stats error: {e}")
-        await message.answer("❌ Ошибка при формировании статистики.")
+        logging.error(f"Stats calculation error: {e}", exc_info=True)
+        await message.answer("❌ Ошибка при формировании статистики. Попробуй позже.")
     finally:
         conn.close()
 
     await state.clear()
-
 
 # --------------------- Аннулирование данных ---------------------
 @dp.message(F.text == "Аннулировать данные 🗑️")
@@ -771,4 +786,5 @@ if __name__ == "__main__":
     app.on_shutdown.append(on_shutdown)
 
     web.run_app(app, host="0.0.0.0", port=PORT)
+
 
