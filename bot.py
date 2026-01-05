@@ -134,7 +134,8 @@ class States(StatesGroup):
     entering_debtor_name = State()
     entering_debt_amount = State()
     choosing_debt_to_pay = State()
-    choosing_stats_month = State()
+    choosing_stats_type = State()
+    choosing_stats_period = State()
     confirming_clear = State()
 
 # --------------------- Главное меню ---------------------
@@ -160,249 +161,199 @@ async def cmd_start(message: Message):
         reply_markup=main_kb()
     )
 
-# --------------------- Доходы / Расходы ---------------------
+# ===================== Доходы / Расходы =====================
+
 @dp.message(F.text.in_(["Доходы 💹", "Расходы 📉"]))
 async def choose_category(message: Message, state: FSMContext):
     typ = "income" if "Доходы" in message.text else "expense"
     await state.update_data(type=typ)
     cats = get_categories(message.from_user.id, typ)
-    if not cats:
-        await message.answer("📂 Нет категорий. Добавь через 'Категории ➕'.", reply_markup=main_kb())
-        return
-    builder = InlineKeyboardBuilder()
-    rows = [cats[i:i+2] for i in range(0, len(cats), 2)]
-    for row in rows:
-        for c in row:
-            builder.button(text=c, callback_data=f"cat_{typ}_{c}")
-    builder.button(text="❌ Отмена", callback_data="cancel")
-    builder.adjust(2)
-    await message.answer(f"📂 Выбери категорию для <b>{message.text.lower()}</b>:", reply_markup=builder.as_markup())
+
+    kb = InlineKeyboardBuilder()
+    for c in cats:
+        kb.button(text=c, callback_data=f"cat|{typ}|{c}")
+    kb.adjust(2)
+
+    await message.answer("Выберите категорию:", reply_markup=kb.as_markup())
     await state.set_state(States.choosing_category)
 
-@dp.callback_query(F.data.startswith("cat_"))
-async def category_selected(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    _, typ, cat = callback.data.split("_", 2)
-    await state.update_data(category=cat)
-    await callback.message.edit_text(
-        f"✅ Категория: <b>{cat}</b>\n\n"
-        f"💰 Теперь введи сумму (только число):\n<code>2500</code> или <code>499.50</code>"
-    )
+@dp.callback_query(F.data.startswith("cat|"))
+async def category_selected(cb: CallbackQuery, state: FSMContext):
+    _, typ, cat = cb.data.split("|", 2)
+    await state.update_data(type=typ, category=cat)
+    await cb.message.edit_text(f"Введите сумму для <b>{cat}</b>:")
     await state.set_state(States.entering_amount)
 
 @dp.message(States.entering_amount)
-async def add_transaction(message: Message, state: FSMContext):
-    text = message.text.strip().replace(",", ".")
+async def save_transaction(message: Message, state: FSMContext):
     try:
-        amount = float(text)
+        amount = Decimal(message.text.replace(",", "."))
         if amount <= 0:
             raise ValueError
-        data = await state.get_data()
-        typ = data["type"]
-        cat = data["category"]
-        conn = get_db_connection()
-        if not conn:
-            await message.answer("❌ Ошибка базы данных. Попробуй позже.")
-            return
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO transactions (user_id, type, category, amount, date) VALUES (%s, %s, %s, %s, %s)",
-                    (message.from_user.id, typ, cat, amount, datetime.now().strftime("%Y-%m-%d %H:%M"))
-                )
-            conn.commit()
-            emoji = "💹" if typ == "income" else "📉"
-            await message.answer(
-                f"{emoji} <b>{'Доход' if typ=='income' else 'Расход'}</b> добавлен!\n"
-                f"💰 <b>{amount:.2f} сўм</b> → {cat}",
-                reply_markup=main_kb()
-            )
-        except Exception as e:
-            logging.error(f"Transaction add error: {e}")
-            await message.answer("❌ Ошибка при добавлении транзакции.")
-        finally:
-            conn.close()
-    except ValueError:
-        await message.answer("❌ Введи корректную сумму (число > 0)")
+    except:
+        await message.answer("Введите корректную сумму")
         return
+
+    data = await state.get_data()
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO transactions (user_id, type, category, amount)
+                VALUES (%s, %s, %s, %s)
+            """, (message.from_user.id, data["type"], data["category"], amount))
+        conn.commit()
+
+    await message.answer("Операция сохранена", reply_markup=main_kb())
     await state.clear()
 
 # --------------------- Долги ---------------------
-@dp.message(F.text == "Долги 🤝")
-async def debt_start(message: Message, state: FSMContext):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Я должен 📉", callback_data="debt_me")
-    builder.button(text="Мне должны 💹", callback_data="debt_other")
-    builder.button(text="Погасить долг 💰", callback_data="pay_debt")
-    builder.button(text="Возврат долга 🔄", callback_data="return_debt")
-    builder.button(text="Информация о долгах ℹ️", callback_data="debt_info")
-    builder.button(text="❌ Отмена", callback_data="cancel")
-    builder.adjust(1)
-    await message.answer("🤝 Выбери действие с долгами:", reply_markup=builder.as_markup())
-    await state.set_state(States.choosing_debt_type)
+@dp.message(F.text == "🤝 Долги")
+async def debts_menu(message: Message, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Я дал в долг", callback_data="debt_give")],
+        [InlineKeyboardButton(text="➖ Я должен", callback_data="debt_take")],
+        [InlineKeyboardButton(text="📋 Список долгов", callback_data="debt_list")],
+        [InlineKeyboardButton(text="✅ Погасить долг", callback_data="debt_pay")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
+    ])
+    await state.clear()
+    await message.answer("🤝 Управление долгами:", reply_markup=kb)
 
-@dp.callback_query(F.data.in_(["debt_me", "debt_other"]))
-async def debt_type_selected(callback: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data.in_(["debt_give", "debt_take"]))
+async def choose_debt_type(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    is_me = callback.data == "debt_me"
-    await state.update_data(is_me=is_me)
-    await callback.message.edit_text("👤 Введи имя должника/кредитора (например, 'Друг' или 'Банк'):")
+
+    debt_type = 1 if callback.data == "debt_give" else -1
+    await state.update_data(debt_type=debt_type)
+
+    await callback.message.edit_text("Введите имя человека или описание долга:")
     await state.set_state(States.entering_debtor_name)
 
 @dp.message(States.entering_debtor_name)
 async def enter_debtor_name(message: Message, state: FSMContext):
-    debtor = message.text.strip()
-    if not debtor:
-        await message.answer("❌ Имя не может быть пустым!")
-        return
-    await state.update_data(debtor=debtor)
-    data = await state.get_data()
-    await message.answer(
-        f"💸 Введи сумму долга (только число):\n<code>5000</code>\n\n"
-        f"{'Я должен (-)' if data['is_me'] else 'Мне должны (+)'}"
-    )
+    await state.update_data(debtor_name=message.text)
+    await message.answer("Введите сумму долга:")
     await state.set_state(States.entering_debt_amount)
 
 @dp.message(States.entering_debt_amount)
-async def add_debt(message: Message, state: FSMContext):
-    text = message.text.strip().replace(",", ".")
+async def enter_debt_amount(message: Message, state: FSMContext):
     try:
-        amount = float(text)
+        amount = float(message.text.replace(",", "."))
         if amount <= 0:
             raise ValueError
-        data = await state.get_data()
-        sign = -1 if data["is_me"] else 1
-        description = "Я должен" if data["is_me"] else "Мне должны"
-        conn = get_db_connection()
-        if not conn:
-            await message.answer("❌ Ошибка базы данных.")
-            return
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO debts (user_id, debtor, amount, description, date) VALUES (%s, %s, %s, %s, %s)",
-                    (message.from_user.id, data["debtor"], sign * amount, description, datetime.now().strftime("%Y-%m-%d %H:%M"))
-                )
-            conn.commit()
-            await message.answer(
-                f"🤝 Долг записан: <b>{amount:.2f} сўм</b> ({description}) — {data['debtor']}",
-                reply_markup=main_kb()
-            )
-        except Exception as e:
-            logging.error(f"Debt add error: {e}")
-            await message.answer("❌ Ошибка при добавлении долга.")
-        finally:
-            conn.close()
     except ValueError:
-        await message.answer("❌ Введи корректную сумму (число > 0)")
+        await message.answer("Введите корректную сумму числом.")
         return
+
+    data = await state.get_data()
+    signed_amount = amount * data["debt_type"]
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO debts (user_id, debtor, amount, description, date)
+                VALUES (%s, %s, %s, %s, NOW())
+            """, (
+                message.from_user.id,
+                data["debtor_name"],
+                signed_amount,
+                data["debtor_name"]
+            ))
+            conn.commit()
+    finally:
+        conn.close()
+
+    await message.answer("✅ Долг сохранён.", reply_markup=main_kb())
     await state.clear()
 
-@dp.callback_query(F.data == "pay_debt")
-async def pay_debt_start(callback: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "debt_list")
+async def list_debts(callback: CallbackQuery):
     await callback.answer()
-    uid = callback.from_user.id
+
     conn = get_db_connection()
-    if not conn:
-        await callback.message.answer("❌ Ошибка базы данных.")
-        return
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, debtor, amount, description, date FROM debts WHERE user_id=%s AND amount < 0", (uid,))
+            cur.execute("""
+                SELECT id, debtor, amount
+                FROM debts
+                WHERE user_id=%s
+                ORDER BY date DESC
+            """, (callback.from_user.id,))
             rows = cur.fetchall()
-        if not rows:
-            await callback.message.answer("ℹ️ Нет долгов, которые вы должны.", reply_markup=main_kb())
-            await state.clear()
-            return
-        builder = InlineKeyboardBuilder()
-        for row in rows:
-            text = f"{row['description']} {row['debtor']} {abs(row['amount']):.2f} ({row['date']})"
-            builder.button(text=text, callback_data=f"pay_{row['id']}")
-        builder.button(text="❌ Отмена", callback_data="cancel")
-        builder.adjust(1)
-        await callback.message.edit_text("Выберите долг для погашения:", reply_markup=builder.as_markup())
-        await state.set_state(States.choosing_debt_to_pay)
-    except Exception as e:
-        logging.error(f"Pay debt error: {e}")
-        await callback.message.answer("❌ Ошибка при загрузке долгов.")
     finally:
         conn.close()
 
-@dp.callback_query(F.data == "return_debt")
-async def return_debt_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    uid = callback.from_user.id
-    conn = get_db_connection()
-    if not conn:
-        await callback.message.answer("❌ Ошибка базы данных.")
+    if not rows:
+        await callback.message.edit_text("📭 У вас нет активных долгов.")
         return
+
+    text = "📋 <b>Ваши долги:</b>\n\n"
+    for r in rows:
+        sign = "➕" if r["amount"] > 0 else "➖"
+        text += f"{sign} {r['debtor']}: {r['amount']:.2f}\n"
+
+    await callback.message.edit_text(text)
+
+@dp.callback_query(F.data == "debt_pay")
+async def choose_debt_to_pay(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, debtor, amount, description, date FROM debts WHERE user_id=%s AND amount > 0", (uid,))
+            cur.execute("""
+                SELECT id, debtor, amount
+                FROM debts
+                WHERE user_id=%s
+            """, (callback.from_user.id,))
             rows = cur.fetchall()
-        if not rows:
-            await callback.message.answer("ℹ️ Нет долгов, которые вам должны.", reply_markup=main_kb())
-            await state.clear()
-            return
-        builder = InlineKeyboardBuilder()
-        for row in rows:
-            text = f"{row['description']} {row['debtor']} {row['amount']:.2f} ({row['date']})"
-            builder.button(text=text, callback_data=f"return_{row['id']}")
-        builder.button(text="❌ Отмена", callback_data="cancel")
-        builder.adjust(1)
-        await callback.message.edit_text("Выберите долг для возврата:", reply_markup=builder.as_markup())
-        await state.set_state(States.choosing_debt_to_pay)
-    except Exception as e:
-        logging.error(f"Return debt error: {e}")
-        await callback.message.answer("❌ Ошибка при загрузке долгов.")
     finally:
         conn.close()
 
-@dp.callback_query(F.data.startswith(("pay_", "return_")))
-async def process_debt_payment(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    action, debt_id = callback.data.split("_")
-    conn = get_db_connection()
-    if not conn:
-        await callback.message.answer("❌ Ошибка базы данных.")
+    if not rows:
+        await callback.message.edit_text("Нет долгов для погашения.")
         return
+
+    kb = InlineKeyboardMarkup()
+    for r in rows:
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"{r['debtor']} ({r['amount']:+.2f})",
+                callback_data=f"debt_done_{r['id']}"
+            )
+        ])
+
+    kb.inline_keyboard.append(
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
+    )
+
+    await callback.message.edit_text(
+        "Выберите долг для погашения:",
+        reply_markup=kb
+    )
+    await state.set_state(States.choosing_debt_to_pay)
+
+@dp.callback_query(F.data.startswith("debt_done_"))
+async def pay_debt(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    debt_id = int(callback.data.split("_")[-1])
+
+    conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM debts WHERE id=%s", (debt_id,))
-        conn.commit()
-        await callback.message.edit_text(f"✅ Долг {'погашен' if action == 'pay' else 'возвращён'}!", reply_markup=None)
-        await callback.message.answer("Выбери действие:", reply_markup=main_kb())
-    except Exception as e:
-        logging.error(f"Debt process error: {e}")
-        await callback.message.answer("❌ Ошибка при обработке долга.")
+            cur.execute(
+                "DELETE FROM debts WHERE id=%s AND user_id=%s",
+                (debt_id, callback.from_user.id)
+            )
+            conn.commit()
     finally:
         conn.close()
+
+    await callback.message.edit_text("✅ Долг погашен.")
+    await callback.message.answer("Выберите действие:", reply_markup=main_kb())
     await state.clear()
-
-@dp.callback_query(F.data == "debt_info")
-async def debt_info(callback: CallbackQuery):
-    await callback.answer()
-    uid = callback.from_user.id
-    conn = get_db_connection()
-    if not conn:
-        await callback.message.answer("❌ Ошибка базы данных.")
-        return
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT debtor, amount, description, date FROM debts WHERE user_id=%s", (uid,))
-            rows = cur.fetchall()
-        if not rows:
-            await callback.message.answer("ℹ️ Долгов пока нет.", reply_markup=main_kb())
-            return
-        text = "ℹ️ <b>Информация о долгах:</b>\n\n"
-        for row in rows:
-            text += f"{row['description']} │ {row['amount']:.2f} сўм │ {row['debtor']} │ {row['date']}\n"
-        await callback.message.answer(text, reply_markup=main_kb())
-    except Exception as e:
-        logging.error(f"Debt info error: {e}")
-        await callback.message.answer("❌ Ошибка при загрузке информации о долгах.")
-    finally:
-        conn.close()
 
 # --------------------- Категории ---------------------
 @dp.message(F.text == "Категории ➕")
@@ -450,122 +401,132 @@ async def save_new_category(message: Message, state: FSMContext):
         conn.close()
     await state.clear()
 
-# --------------------- Баланс ---------------------
+# ===================== Баланс =====================
+
 @dp.message(F.text == "Баланс 💼")
-async def show_balance(message: Message):
+async def balance(message: Message):
     uid = message.from_user.id
-    conn = get_db_connection()
-    if not conn:
-        await message.answer("❌ Ошибка связи с базой данных. Попробуй позже.")
-        return
-    try:
+    with db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT COALESCE(SUM(amount), 0) AS sum FROM transactions WHERE user_id=%s AND type='income'", (uid,))
-            income = cur.fetchone()["sum"]
-            cur.execute("SELECT COALESCE(SUM(amount), 0) AS sum FROM transactions WHERE user_id=%s AND type='expense'", (uid,))
-            expense = cur.fetchone()["sum"]
-            cur.execute("SELECT COALESCE(SUM(amount), 0) AS sum FROM debts WHERE user_id=%s", (uid,))
-            debt = cur.fetchone()["sum"]
-        balance = income - expense
-        await message.answer(
-            f"💼 <b>Твой текущий баланс</b>\n\n"
-            f"📊 Доходы: <b>{income:.2f} сўм</b>\n"
-            f"📉 Расходы: <b>{expense:.2f} сўм</b>\n"
-            f"🤝 Долги (нетто): <b>{debt:+.2f} сўм</b>\n"
-            f"🌟 <b>Чистый баланс (Доходы − Расходы): {balance:.2f} сўм</b>",
-            reply_markup=main_kb()
-        )
+            cur.execute("""
+                SELECT
+                  COALESCE(SUM(CASE WHEN type='income' THEN amount END),0) AS inc,
+                  COALESCE(SUM(CASE WHEN type='expense' THEN amount END),0) AS exp
+                FROM transactions WHERE user_id=%s
+            """, (uid,))
+            row = cur.fetchone()
+
+            cur.execute("SELECT COALESCE(SUM(amount),0) AS debt FROM debts WHERE user_id=%s", (uid,))
+            debt = cur.fetchone()["debt"]
+
+    cash_balance = row["inc"] - row["exp"]
+    full_balance = cash_balance + debt
+
+    await message.answer(
+        f"💼 <b>Баланс</b>\n\n"
+        f"💹 Доходы: {row['inc']:.2f}\n"
+        f"📉 Расходы: {row['exp']:.2f}\n"
+        f"💰 Денежный баланс: {cash_balance:.2f}\n"
+        f"🤝 Долги (нетто): {debt:+.2f}\n"
+        f"⭐ С учётом долгов: {full_balance:.2f}",
+        reply_markup=main_kb()
+    )
     except Exception as e:
         logging.error(f"Balance error: {e}", exc_info=True)
         await message.answer("❌ Ошибка при расчёте баланса. Попробуй позже.")
     finally:
         conn.close()
 
-# --------------------- Статистика ---------------------
+# ================= СТАТИСТИКА =================
+
 @dp.message(F.text == "Статистика 📊")
-async def show_stats_start(message: Message, state: FSMContext):
-    builder = InlineKeyboardBuilder()
-    today = datetime.now()
-    for i in range(12):
-        month = (today - timedelta(days=30 * i)).strftime("%Y-%m")
-        builder.button(text=month, callback_data=f"stats_{month}")
-    builder.button(text="❌ Отмена", callback_data="cancel")
-    builder.adjust(3)
-    await message.answer("📊 Выберите месяц для статистики:", reply_markup=builder.as_markup())
-    await state.set_state(States.choosing_stats_month)
+async def stats_start(message: Message, state: FSMContext):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Общая", callback_data="stats_general")
+    kb.button(text="Подробная", callback_data="stats_detailed")
+    kb.adjust(1)
+    await message.answer("Выберите тип статистики:", reply_markup=kb.as_markup())
+    await state.set_state(States.choosing_stats_type)
 
 @dp.callback_query(F.data.startswith("stats_"))
-async def show_stats(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    month = callback.data.split("_")[1]
-    uid = callback.from_user.id
-    conn = get_db_connection()
-    if not conn:
-        await callback.message.answer("❌ Ошибка базы данных.")
-        await state.clear()
-        return
-    try:
-        with conn.cursor() as cur:
-            # Общая статистика
-            cur.execute("""
-                SELECT COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END), 0) AS inc,
-                       COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END), 0) AS exp
-                FROM transactions
-                WHERE user_id=%s AND to_char(CAST(date AS timestamp), 'YYYY-MM') = %s
-            """, (uid, month))
-            total_row = cur.fetchone()
-            inc = total_row['inc']
-            exp = total_row['exp']
+async def choose_period(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(stats_type=cb.data.split("_")[1])
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Текущий месяц", callback_data="period_month")
+    kb.button(text="Прошлый месяц", callback_data="period_prev_month")
+    kb.button(text="Год", callback_data="period_year")
+    kb.button(text="Все время", callback_data="period_all")
+    kb.adjust(2)
+    await cb.message.edit_text("Выберите период:", reply_markup=kb.as_markup())
+    await state.set_state(States.choosing_stats_period)
 
-            cur.execute("""
-                SELECT COALESCE(SUM(amount), 0) AS debt_sum
-                FROM debts
-                WHERE user_id=%s AND to_char(CAST(date AS timestamp), 'YYYY-MM') = %s
-            """, (uid, month))
-            debt = cur.fetchone()['debt_sum']
+def get_period(period: str):
+    now = datetime.now()
+    if period == "month":
+        start = now.replace(day=1, hour=0, minute=0, second=0)
+        end = now
+    elif period == "prev_month":
+        first = now.replace(day=1)
+        end = first
+        start = (first - timedelta(days=1)).replace(day=1)
+    elif period == "year":
+        start = now.replace(month=1, day=1, hour=0, minute=0, second=0)
+        end = now
+    else:
+        start = datetime(2000, 1, 1)
+        end = now
+    return start, end
 
-            # Подробная статистика по категориям доходов
+@dp.callback_query(F.data.startswith("period_"))
+async def show_stats(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    stats_type = data["stats_type"]
+    period_key = cb.data.split("_")[1]
+    start, end = get_period(period_key)
+    uid = cb.from_user.id
+
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+              COALESCE(SUM(CASE WHEN type='income' THEN amount END),0) AS inc,
+              COALESCE(SUM(CASE WHEN type='expense' THEN amount END),0) AS exp
+            FROM transactions
+            WHERE user_id=%s AND date BETWEEN %s AND %s
+        """, (uid, start, end))
+        totals = cur.fetchone()
+
+        cur.execute("""
+            SELECT COALESCE(SUM(amount),0) AS debt
+            FROM debts WHERE user_id=%s
+        """, (uid,))
+        debt = cur.fetchone()["debt"]
+
+        text = (
+            f"📊 <b>Статистика</b>\n\n"
+            f"💹 Доходы: {totals['inc']:.2f}\n"
+            f"📉 Расходы: {totals['exp']:.2f}\n"
+            f"💰 Баланс: {(totals['inc'] - totals['exp']):.2f}\n"
+            f"🤝 Долги: {debt:+.2f}\n"
+            f"⭐ Итог: {(totals['inc'] - totals['exp'] + debt):.2f}\n\n"
+        )
+
+        if stats_type == "detailed":
             cur.execute("""
-                SELECT category, SUM(amount) AS sum
+                SELECT category, SUM(amount) s
                 FROM transactions
-                WHERE user_id=%s AND type='income' AND to_char(CAST(date AS timestamp), 'YYYY-MM') = %s
+                WHERE user_id=%s AND type='expense'
+                AND date BETWEEN %s AND %s
                 GROUP BY category
-                ORDER BY sum DESC
-            """, (uid, month))
-            income_details = cur.fetchall()
+                ORDER BY s DESC
+            """, (uid, start, end))
+            rows = cur.fetchall()
+            if rows:
+                text += "<b>Расходы по категориям:</b>\n"
+                for r in rows:
+                    text += f"• {r['category']}: {r['s']:.2f}\n"
 
-            # Подробная статистика по категориям расходов
-            cur.execute("""
-                SELECT category, SUM(amount) AS sum
-                FROM transactions
-                WHERE user_id=%s AND type='expense' AND to_char(CAST(date AS timestamp), 'YYYY-MM') = %s
-                GROUP BY category
-                ORDER BY sum DESC
-            """, (uid, month))
-            expense_details = cur.fetchall()
-
-        bal = inc - exp
-        text = f"📊 <b>Статистика за {month}</b>\n\n"
-        text += f"Доход: {inc:.0f} │ Расход: {exp:.0f} │ Долги: {debt:+.0f} │ <b>Баланс: {bal:.0f}</b>\n\n"
-
-        if income_details:
-            text += "<b>Доходы по категориям:</b>\n"
-            for detail in income_details:
-                text += f"{detail['category']}: {detail['sum']:.0f} сўм\n"
-            text += "\n"
-
-        if expense_details:
-            text += "<b>Расходы по категориям:</b>\n"
-            for detail in expense_details:
-                text += f"{detail['category']}: {detail['sum']:.0f} сўм\n"
-
-        await callback.message.edit_text(text, reply_markup=None)
-        await callback.message.answer("Выбери действие:", reply_markup=main_kb())
-    except Exception as e:
-        logging.error(f"Stats error: {e}", exc_info=True)
-        await callback.message.answer("❌ Ошибка при формировании статистики.")
-    finally:
-        conn.close()
+    await cb.message.edit_text(text)
+    await cb.message.answer("Главное меню", reply_markup=main_kb())
     await state.clear()
 
 # --------------------- Аннулирование данных ---------------------
