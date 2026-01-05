@@ -1,6 +1,7 @@
 import logging
 import os
 from datetime import datetime
+
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.errors import UniqueViolation
@@ -20,23 +21,17 @@ from aiogram.types import (
     KeyboardButton,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram import DefaultBotProperties
+from aiogram.client.default import DefaultBotProperties
 
 logging.basicConfig(level=logging.INFO)
 
-# Переменные окружения (Koyeb предоставляет автоматически)
+# Переменные окружения
 TOKEN = os.getenv("TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 KOYEB_PUBLIC_DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
 
-if not TOKEN:
-    logging.error("Переменная TOKEN не установлена!")
-    exit(1)
-if not DATABASE_URL:
-    logging.error("Переменная DATABASE_URL не установлена! Подключите PostgreSQL.")
-    exit(1)
-if not KOYEB_PUBLIC_DOMAIN:
-    logging.error("Переменная KOYEB_PUBLIC_DOMAIN не установлена!")
+if not TOKEN or not DATABASE_URL or not KOYEB_PUBLIC_DOMAIN:
+    logging.error("Не установлены обязательные переменные: TOKEN, DATABASE_URL, KOYEB_PUBLIC_DOMAIN")
     exit(1)
 
 PORT = int(os.getenv("PORT", 8000))
@@ -48,16 +43,12 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 
-# --------------------- Подключение к БД (Psycopg 3) ---------------------
+# --------------------- БД ---------------------
 def get_db_connection():
     try:
-        conn = psycopg.connect(
-            DATABASE_URL,
-            row_factory=dict_row  # Возвращает строки как словари (аналог RealDictCursor)
-        )
-        return conn
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
     except Exception as e:
-        logging.error(f"Failed to connect to DB: {e}")
+        logging.error(f"DB connection error: {e}")
         return None
 
 
@@ -97,9 +88,9 @@ def init_db():
                 )
             """)
         conn.commit()
-        logging.info("Database tables initialized")
+        logging.info("DB initialized")
     except Exception as e:
-        logging.error(f"Error initializing DB: {e}")
+        logging.error(f"DB init error: {e}")
     finally:
         conn.close()
 
@@ -134,7 +125,7 @@ def get_categories(user_id: int, typ: str):
             custom = [row["name"] for row in cur.fetchall()]
         return (DEFAULT_INCOME + custom) if typ == "income" else (DEFAULT_EXPENSE + custom)
     except Exception as e:
-        logging.error(f"Error getting categories: {e}")
+        logging.error(f"Categories error: {e}")
         return DEFAULT_INCOME if typ == "income" else DEFAULT_EXPENSE
     finally:
         conn.close()
@@ -424,26 +415,15 @@ async def show_stats(message: Message, state: FSMContext):
 
     await state.clear()
 
-
-# --------------------- Остальные хэндлеры (долги, категории, очистка, отмена) ---------------------
-# (Они остались без изменений по логике, только используют новый conn)
-
-# Пример одного из них (остальные аналогично — просто копируй из предыдущей версии)
-# ... (вставь сюда хэндлеры долгов, категорий, погашения, информации, очистки, cancel, unknown)
-
-# Для краткости не дублирую их все здесь, но они полностью совместимы с Psycopg 3.
-
 # --------------------- Webhook ---------------------
 async def on_startup(app):
     init_db()
-    await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
-    logging.info(f"Webhook установлен: {WEBHOOK_URL}")
-
+    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+    logging.info(f"Webhook set: {WEBHOOK_URL}")
 
 async def on_shutdown(app):
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Webhook удалён")
-
+    logging.info("Webhook deleted")
 
 if __name__ == "__main__":
     from aiohttp import web
@@ -452,9 +432,8 @@ if __name__ == "__main__":
     app = web.Application()
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
-
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
-
     web.run_app(app, host="0.0.0.0", port=PORT)
+
 
