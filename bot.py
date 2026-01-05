@@ -549,14 +549,26 @@ async def show_balance(message: Message):
 
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT SUM(amount) FROM transactions WHERE user_id=%s AND type='income'", (uid,))
-            income = cur.fetchone()[0] or 0.0
+            # Доходы
+            cur.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE user_id=%s AND type='income'",
+                (uid,)
+            )
+            income = cur.fetchone()[0]
 
-            cur.execute("SELECT SUM(amount) FROM transactions WHERE user_id=%s AND type='expense'", (uid,))
-            expense = cur.fetchone()[0] or 0.0
+            # Расходы
+            cur.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE user_id=%s AND type='expense'",
+                (uid,)
+            )
+            expense = cur.fetchone()[0]
 
-            cur.execute("SELECT SUM(amount) FROM debts WHERE user_id=%s", (uid,))
-            debt = cur.fetchone()[0] or 0.0
+            # Долги (нетто: положительные — мне должны, отрицательные — я должен)
+            cur.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM debts WHERE user_id=%s",
+                (uid,)
+            )
+            debt = cur.fetchone()[0]
 
         balance = income - expense
 
@@ -569,8 +581,8 @@ async def show_balance(message: Message):
             reply_markup=main_kb()
         )
     except Exception as e:
-        logging.error(f"Balance error: {e}")
-        await message.answer("❌ Ошибка при расчёте баланса.")
+        logging.error(f"Balance calculation error: {e}", exc_info=True)  # Полная трассировка
+        await message.answer("❌ Ошибка при расчёте баланса. Попробуй позже.")
     finally:
         conn.close()
 
@@ -759,3 +771,4 @@ if __name__ == "__main__":
     app.on_shutdown.append(on_shutdown)
 
     web.run_app(app, host="0.0.0.0", port=PORT)
+
