@@ -95,21 +95,19 @@ def init_db():
 
 # --------------------- Категории ---------------------
 DEFAULT_INCOME = [
-    "Зарплата 📡", "Аванс 💰", "Премия 🎉", "Фриланс 💻",
-    "Подарок 🎁", "Кэшбэк 💸", "Проценты по вкладу 📈", "Дивиденды 📊",
-    "Продажа вещи 🛒", "Возврат долга 🤝", "Подработка ⚡", "Стипендия 📚",
-    "Пенсия 👴", "Пособие 👶", "Алименты 👨‍👩‍👧"
+    "Зарплата 💳", "Аванс 💰", "Премия 🎉", "Фриланс 💻",
+    "Подарок 🎁", "Проценты по вкладу 📈", "Дивиденды 📊",
+    "Продажа вещи 🛒", "Возврат долга 🤝", "Подработка ⚡"
 ]
 
 DEFAULT_EXPENSE = [
-    "Еда дома 🍳", "Кафе/рестораны 🍔", "Продукты 🛍️", "Алкоголь 🍷",
-    "Транспорт 🚕", "Бензин ⛽", "Общественный транспорт 🚇", "Такси 🚖",
-    "ЖКХ 🏠", "Интернет 📡", "Мобильная связь 📱", "Электричество ⚡",
-    "Аренда жилья 🏡", "Одежда 👕", "Обувь 👟", "Косметика 💄",
-    "Развлечения 🎬", "Кино 🎥", "Концерты 🎸", "Игры 🎮",
-    "Подписки 📺", "Спорт/фитнес 🏋️", "Медицина 💊", "Лекарства 🏥",
-    "Подарки 🎁", "Благотворительность ❤️", "Образование 📖", "Курсы 🎓",
-    "Ремонт 🔧", "Бытовая техника 🧼", "Путешествия ✈️", "Отель 🏨"
+    "Кафе/рестораны 🍔", "Продукты 🛍️", "Транспорт 🚕", 
+    "ЖКХ 🏠", "Интернет 📡", "Мобильная связь 📱", 
+    "Аренда жилья 🏡", "Одежда 👕", "Косметика 💄",
+    "Развлечения 🎬", "Бензин ⛽", "Такси 🚖",
+    "Подписки 📺", "Спорт/фитнес 🏋️", "Медицина 💊", 
+    "Подарки 🎁", "Благотворительность ❤️", "Образование 📖", 
+    "Ремонт 🔧", "Бытовая техника 🧼", "Путешествия ✈️" 
 ]
 
 
@@ -238,9 +236,7 @@ async def add_transaction(message: Message, state: FSMContext):
 
 
 # --------------------- Долги ---------------------
-# (Все хэндлеры долгов остались без изменений — они работают отлично)
-
-@dp.message(F.text == "Долги 🤝")
+@dp.message(F.text == "Долги 📕")
 async def debt_start(message: Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.button(text="Я должен 📉", callback_data="debt_me")
@@ -253,7 +249,175 @@ async def debt_start(message: Message, state: FSMContext):
     await message.answer("🤝 Выбери действие с долгами:", reply_markup=builder.as_markup())
     await state.set_state(States.choosing_debt_type)
 
-# (Остальные хэндлеры долгов — debt_type_selected, enter_debtor_name, add_debt, pay_debt_start, return_debt_start, process_debt_payment, debt_info — копируй из твоего предыдущего кода, они работают)
+@dp.callback_query(F.data.in_(["debt_me", "debt_other"]))
+async def debt_type_selected(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    is_me = callback.data == "debt_me"
+    await state.update_data(is_me=is_me)
+    await callback.message.edit_text("👤 Введи имя должника/кредитора (например, 'Друг' или 'Банк'):")
+    await state.set_state(States.entering_debtor_name)
+
+@dp.message(States.entering_debtor_name)
+async def enter_debtor_name(message: Message, state: FSMContext):
+    debtor = message.text.strip()
+    if not debtor:
+        await message.answer("❌ Имя не может быть пустым!")
+        return
+    await state.update_data(debtor=debtor)
+    data = await state.get_data()
+    await message.answer(
+        f"💸 Введи сумму долга (только число):\n<code>5000</code>\n\n"
+        f"{'Я должен (-)' if data['is_me'] else 'Мне должны (+)'}"
+    )
+    await state.set_state(States.entering_debt_amount)
+
+@dp.message(States.entering_debt_amount)
+async def add_debt(message: Message, state: FSMContext):
+    text = message.text.strip().replace(",", ".")
+    try:
+        amount = float(text)
+        if amount <= 0:
+            raise ValueError
+        data = await state.get_data()
+        sign = -1 if data["is_me"] else 1
+        description = "Я должен" if data["is_me"] else "Мне должны"
+        conn = get_db_connection()
+        if not conn:
+            await message.answer("❌ Ошибка базы данных.")
+            return
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO debts (user_id, debtor, amount, description, date) VALUES (%s, %s, %s, %s, %s)",
+                    (message.from_user.id, data["debtor"], sign * amount, description, datetime.now().strftime("%Y-%m-%d %H:%M"))
+                )
+            conn.commit()
+            await message.answer(
+                f"🤝 Долг записан: <b>{amount:.2f} сўм</b> ({description}) — {data['debtor']}",
+                reply_markup=main_kb()
+            )
+        except Exception as e:
+            logging.error(f"Debt add error: {e}")
+            await message.answer("❌ Ошибка при добавлении долга.")
+        finally:
+            conn.close()
+    except ValueError:
+        await message.answer("❌ Введи корректную сумму (число > 0)")
+        return
+    await state.clear()
+
+@dp.callback_query(F.data == "pay_debt")
+async def pay_debt_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    uid = callback.from_user.id
+    conn = get_db_connection()
+    if not conn:
+        await callback.message.answer("❌ Ошибка базы данных.")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, debtor, amount, description, date FROM debts WHERE user_id=%s AND amount < 0", (uid,))
+            rows = cur.fetchall()
+        if not rows:
+            await callback.message.answer("ℹ️ Нет долгов, которые вы должны.", reply_markup=main_kb())
+            await state.clear()
+            return
+        builder = InlineKeyboardBuilder()
+        for row in rows:
+            text = f"{row['description']} {row['debtor']} {abs(row['amount']):.2f} сўм ({row['date'][:10]})"
+            builder.button(text=text, callback_data=f"pay_{row['id']}")
+        builder.button(text="❌ Отмена", callback_data="cancel")
+        builder.adjust(1)
+        await callback.message.edit_text("Выберите долг для погашения:", reply_markup=builder.as_markup())
+        await state.set_state(States.choosing_debt_to_pay)
+    except Exception as e:
+        logging.error(f"Pay debt error: {e}")
+        await callback.message.answer("❌ Ошибка при загрузке долгов.")
+    finally:
+        conn.close()
+
+@dp.callback_query(F.data == "return_debt")
+async def return_debt_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    uid = callback.from_user.id
+    conn = get_db_connection()
+    if not conn:
+        await callback.message.answer("❌ Ошибка базы данных.")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, debtor, amount, description, date FROM debts WHERE user_id=%s AND amount > 0", (uid,))
+            rows = cur.fetchall()
+        if not rows:
+            await callback.message.answer("ℹ️ Нет долгов, которые вам должны.", reply_markup=main_kb())
+            await state.clear()
+            return
+        builder = InlineKeyboardBuilder()
+        for row in rows:
+            text = f"{row['description']} {row['debtor']} {row['amount']:.2f} сўм ({row['date'][:10]})"
+            builder.button(text=text, callback_data=f"return_{row['id']}")
+        builder.button(text="❌ Отмена", callback_data="cancel")
+        builder.adjust(1)
+        await callback.message.edit_text("Выберите долг для возврата:", reply_markup=builder.as_markup())
+        await state.set_state(States.choosing_debt_to_pay)
+    except Exception as e:
+        logging.error(f"Return debt error: {e}")
+        await callback.message.answer("❌ Ошибка при загрузке долгов.")
+    finally:
+        conn.close()
+
+@dp.callback_query(F.data.startswith(("pay_", "return_")))
+async def process_debt_payment(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    action, debt_id_str = callback.data.split("_")
+    try:
+        debt_id = int(debt_id_str)
+    except ValueError:
+        await callback.message.answer("❌ Ошибка обработки долга.")
+        return
+    conn = get_db_connection()
+    if not conn:
+        await callback.message.answer("❌ Ошибка базы данных.")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM debts WHERE id=%s AND user_id=%s", (debt_id, callback.from_user.id))
+        conn.commit()
+        action_text = "погашен" if action == "pay" else "возвращён"
+        await callback.message.edit_text(f"✅ Долг {action_text}!", reply_markup=None)
+        await callback.message.answer("Главное меню:", reply_markup=main_kb())
+    except Exception as e:
+        logging.error(f"Debt process error: {e}")
+        await callback.message.answer("❌ Ошибка при обработке долга.")
+    finally:
+        conn.close()
+    await state.clear()
+
+@dp.callback_query(F.data == "debt_info")
+async def debt_info(callback: CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    conn = get_db_connection()
+    if not conn:
+        await callback.message.answer("❌ Ошибка базы данных.")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT debtor, amount, description, date FROM debts WHERE user_id=%s ORDER BY date DESC", (uid,))
+            rows = cur.fetchall()
+        if not rows:
+            await callback.message.answer("ℹ️ Долгов пока нет.", reply_markup=main_kb())
+            return
+        text = "ℹ️ <b>Информация о долгах:</b>\n\n"
+        for row in rows:
+            sign = "-" if row['amount'] < 0 else "+"
+            text += f"• {row['description']} {row['debtor']}: {sign}{abs(row['amount']):.0f} сўм ({row['date'][:10]})\n"
+        await callback.message.answer(text, reply_markup=main_kb())
+    except Exception as e:
+        logging.error(f"Debt info error: {e}")
+        await callback.message.answer("❌ Ошибка при загрузке информации о долгах.")
+    finally:
+        conn.close()
 
 # --------------------- Баланс ---------------------
 @dp.message(F.text == "Баланс 💼")
@@ -393,6 +557,51 @@ async def show_stats(callback: CallbackQuery):
         await callback.message.answer("❌ Ошибка при загрузке статистики. Попробуй позже.")
     finally:
         conn.close()
+# --------------------- Категории ---------------------
+@dp.message(F.text == "Категории ➕")
+async def add_category_start(message: Message, state: FSMContext):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Доходы 💹", callback_data="newcat_income")
+    builder.button(text="Расходы 📉", callback_data="newcat_expense")
+    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.adjust(1)
+    await message.answer("➕ Для какого типа добавить категорию?", reply_markup=builder.as_markup())
+    await state.set_state(States.adding_category_type)
+
+@dp.callback_query(F.data.startswith("newcat_"))
+async def add_category_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    typ = callback.data.split("_")[1]
+    await state.update_data(cat_type=typ)
+    await callback.message.edit_text("📝 Введи название новой категории (без эмодзи):")
+    await state.set_state(States.entering_category_name)
+
+@dp.message(States.entering_category_name)
+async def save_new_category(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if not name:
+        await message.answer("❌ Название не может быть пустым!")
+        return
+    data = await state.get_data()
+    typ = data["cat_type"]
+    user_id = message.from_user.id
+    conn = get_db_connection()
+    if not conn:
+        await message.answer("❌ Ошибка базы данных.")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO categories (user_id, type, name) VALUES (%s, %s, %s)", (user_id, typ, name))
+        conn.commit()
+        await message.answer(f"✅ Категория <b>{name}</b> добавлена в { 'доходы' if typ == 'income' else 'расходы' }!", reply_markup=main_kb())
+    except UniqueViolation:
+        await message.answer("❌ Такая категория уже существует!", reply_markup=main_kb())
+    except Exception as e:
+        logging.error(f"Category add error: {e}")
+        await message.answer("❌ Ошибка при добавлении категории.")
+    finally:
+        conn.close()
+    await state.clear()
 # --------------------- Аннулирование данных ---------------------
 @dp.message(F.text == "Аннулировать данные 🗑️")
 async def clear_data_start(message: Message, state: FSMContext):
@@ -459,6 +668,7 @@ if __name__ == "__main__":
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     web.run_app(app, host="0.0.0.0", port=PORT)
+
 
 
 
