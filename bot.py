@@ -393,7 +393,7 @@ async def show_stats(callback: CallbackQuery):
         await callback.message.answer("❌ Ошибка при загрузке статистики. Попробуй позже.")
     finally:
         conn.close()
---------------------- Аннулирование данных ---------------------
+# --------------------- Аннулирование данных ---------------------
 @dp.message(F.text == "Аннулировать данные 🗑️")
 async def clear_data_start(message: Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
@@ -459,5 +459,6 @@ if __name__ == "__main__":
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     web.run_app(app, host="0.0.0.0", port=PORT)
+
 
 
