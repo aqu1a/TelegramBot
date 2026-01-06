@@ -287,20 +287,21 @@ async def show_balance(message: Message):
         conn.close()
 
 
-# --------------------- Статистика (упрощённая и надёжная) ---------------------
+# --------------------- Статистика (упрощённая и исправленная) ---------------------
 @dp.message(F.text == "Статистика 📊")
 async def stats_menu(message: Message):
     builder = InlineKeyboardBuilder()
     today = datetime.now()
     for i in range(12):
-        month_date = today - timedelta(days=30*i)
-        month_str = month_date.strftime("%Y-%m")
-        month_name = month_date.strftime("%B %Y")
+        month_date = today - timedelta(days=30 * i)
+        month_str = month_date.strftime("%Y-%m")  # Для фильтра: 2026-01
+        month_name = month_date.strftime("%B %Y")  # Красиво: January 2026
         builder.button(text=month_name, callback_data=f"stats_{month_str}")
     builder.button(text="За всё время", callback_data="stats_all")
     builder.button(text="❌ Отмена", callback_data="cancel")
-    builder.adjust(2)
+    builder.adjust(2)  # По 2 кнопки в ряд
     await message.answer("📊 Выбери период для статистики:", reply_markup=builder.as_markup())
+
 
 @dp.callback_query(F.data.startswith("stats_"))
 async def show_stats(callback: CallbackQuery):
@@ -309,19 +310,22 @@ async def show_stats(callback: CallbackQuery):
     uid = callback.from_user.id
     conn = get_db_connection()
     if not conn:
-        await callback.message.answer("❌ Ошибка базы данных.")
+        await callback.message.answer("❌ Ошибка базы данных. Попробуй позже.")
         return
+
     try:
         with conn.cursor() as cur:
             if period == "all":
                 filter_sql = ""
+                params = (uid,)
                 title = "за всё время"
             else:
                 filter_sql = "AND to_char(CAST(date AS timestamp), 'YYYY-MM') = %s"
-                title = period
                 params = (uid, period)
-            else:
-                params = (uid,)
+                # Красивое название месяца
+                year, month_num = period.split("-")
+                month_name = datetime(int(year), int(month_num), 1).strftime("%B %Y")
+                title = f"за {month_name}"
 
             # Доходы и расходы
             cur.execute(f"""
@@ -331,8 +335,8 @@ async def show_stats(callback: CallbackQuery):
                 WHERE user_id=%s {filter_sql}
             """, params)
             totals = cur.fetchone()
-            inc = totals['inc']
-            exp = totals['exp']
+            inc = totals['inc'] if totals else 0.0
+            exp = totals['exp'] if totals else 0.0
 
             # Долги
             cur.execute(f"""
@@ -340,23 +344,26 @@ async def show_stats(callback: CallbackQuery):
                 FROM debts
                 WHERE user_id=%s {filter_sql}
             """, params)
-            debt = cur.fetchone()['debt_sum']
+            debt_row = cur.fetchone()
+            debt = debt_row['debt_sum'] if debt_row else 0.0
 
-            # По категориям доходов
+            # Доходы по категориям
             cur.execute(f"""
                 SELECT category, SUM(amount) AS sum
                 FROM transactions
                 WHERE user_id=%s AND type='income' {filter_sql}
-                GROUP BY category ORDER BY sum DESC
+                GROUP BY category
+                ORDER BY sum DESC
             """, params)
             income_cat = cur.fetchall()
 
-            # По категориям расходов
+            # Расходы по категориям
             cur.execute(f"""
                 SELECT category, SUM(amount) AS sum
                 FROM transactions
                 WHERE user_id=%s AND type='expense' {filter_sql}
-                GROUP BY category ORDER BY sum DESC
+                GROUP BY category
+                ORDER BY sum DESC
             """, params)
             expense_cat = cur.fetchall()
 
@@ -365,28 +372,27 @@ async def show_stats(callback: CallbackQuery):
         text += f"Доход: <b>{inc:.0f}</b> │ Расход: <b>{exp:.0f}</b> │ Долги: <b>{debt:+.0f}</b> │ Баланс: <b>{bal:.0f}</b> сўм\n\n"
 
         if income_cat:
-            text += "<b>Доходы по категориям:</b>\n"
+            text += "<b>💹 Доходы по категориям:</b>\n"
             for c in income_cat:
                 text += f"• {c['category']}: {c['sum']:.0f} сўм\n"
             text += "\n"
 
         if expense_cat:
-            text += "<b>Расходы по категориям:</b>\n"
+            text += "<b>📉 Расходы по категориям:</b>\n"
             for c in expense_cat:
                 text += f"• {c['category']}: {c['sum']:.0f} сўм\n"
 
         if not income_cat and not expense_cat:
-            text += "Нет данных за этот период."
+            text += "Нет транзакций за этот период."
 
         await callback.message.edit_text(text)
         await callback.message.answer("Главное меню:", reply_markup=main_kb())
+
     except Exception as e:
         logging.error(f"Stats error: {e}", exc_info=True)
-        await callback.message.answer("❌ Ошибка статистики.")
+        await callback.message.answer("❌ Ошибка при загрузке статистики. Попробуй позже.")
     finally:
         conn.close()
-
-
 --------------------- Аннулирование данных ---------------------
 @dp.message(F.text == "Аннулировать данные 🗑️")
 async def clear_data_start(message: Message, state: FSMContext):
@@ -453,4 +459,5 @@ if __name__ == "__main__":
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     web.run_app(app, host="0.0.0.0", port=PORT)
+
 
