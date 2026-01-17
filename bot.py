@@ -21,20 +21,18 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 
+# ------------------- Логи + переменные -------------------
 logging.basicConfig(level=logging.INFO)
 
-# Переменные окружения
 TOKEN = os.getenv("TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-KOYEB_PUBLIC_DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
 
-if not TOKEN or not DATABASE_URL or not KOYEB_PUBLIC_DOMAIN:
-    logging.error("Не установлены обязательные переменные окружения!")
+if not TOKEN:
+    logging.error("TOKEN не установлен!")
     exit(1)
 
-PORT = int(os.getenv("PORT", 8000))
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = f"https://{KOYEB_PUBLIC_DOMAIN}{WEBHOOK_PATH}"
+if not DATABASE_URL:
+    logging.warning("DATABASE_URL не найден → статистика и сохранение работать не будут")
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 storage = MemoryStorage()
@@ -651,19 +649,19 @@ async def cancel(callback: CallbackQuery, state: FSMContext):
 async def unknown_message(message: Message):
     await message.answer("❓ Не понял. Используй кнопки ниже или команду /start", reply_markup=main_kb())
 
-# --------------------- Webhook ---------------------
-async def on_startup(app):
+# ------------------- Инициализация БД при старте -------------------
+async def on_startup():
     init_db()
-    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-    logging.info(f"Webhook установлен: {WEBHOOK_URL}")
+    logging.info("Бот запущен (polling mode)")
 
-async def on_shutdown(app):
-    await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Webhook удалён")
+# ------------------- Главный запуск (polling!) -------------------
+async def main():
+    await on_startup()
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
-    from aiohttp import web
-    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+    import asyncio
+    asyncio.run(main())
 
     app = web.Application()
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
@@ -671,6 +669,7 @@ if __name__ == "__main__":
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     web.run_app(app, host="0.0.0.0", port=PORT)
+
 
 
 
